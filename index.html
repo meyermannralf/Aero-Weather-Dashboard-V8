@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AeroWeather Dashboard + Live ATIS & METAR</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 md:p-8">
+
+    <div class="max-w-7xl mx-auto mb-6 text-center md:text-left border-b border-slate-900 pb-4">
+        <h1 class="text-3xl md:text-5xl font-black tracking-tight bg-gradient-to-r from-blue-400 via-indigo-400 to-sky-400 bg-clip-text text-transparent">
+            AeroWeather Dashboard
+        </h1>
+    </div>
+
+    <div id="dashboard-grid" class="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- Lade-Skelette -->
+        <div class="animate-pulse bg-slate-900/40 border border-slate-800 rounded-2xl p-6 h-[480px]"></div>
+        <div class="animate-pulse bg-slate-900/40 border border-slate-800 rounded-2xl p-6 h-[480px]"></div>
+        <div class="animate-pulse bg-slate-900/40 border border-slate-800 rounded-2xl p-6 h-[480px]"></div>
+    </div>
+
+    <script>
+        const AIRPORTS = [
+            { code: 'FMO', icao: 'EDDG', name: 'Münster/Osnabrück', lat: 52.1346, lon: 7.6848 },
+            { code: 'AMS', icao: 'EHAM', name: 'Amsterdam Schiphol', lat: 52.3105, lon: 4.7683 },
+            { code: 'FRA', icao: 'EDDF', name: 'Frankfurt', lat: 50.0379, lon: 8.5622 },
+            { code: 'CGN', icao: 'EDDK', name: 'Köln/Bonn', lat: 50.8659, lon: 7.1427 },
+            { code: 'DUS', icao: 'EDDL', name: 'Düsseldorf', lat: 51.2895, lon: 6.7668 },
+            { code: 'BRU', icao: 'EBBR', name: 'Brüssel-Zaventem', lat: 50.9008, lon: 4.4856 },
+            { code: 'LGG', icao: 'EBLG', name: 'Lüttich', lat: 50.6374, lon: 5.4432 }
+        ];
+
+        const WEEKDAYS = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
+
+        const getWindDirectionLabel = (deg) => {
+            const directions = ['N', 'NO', 'O', 'SO', 'S', 'SW', 'W', 'NW'];
+            const index = Math.round(deg / 45) % 8;
+            return directions[index];
+        };
+
+        const parseMetarWind = (metarStr) => {
+            if (!metarStr) return null;
+            const match = metarStr.match(/\b(VRB|\d{3})(\d{2,3})(G\d{2,3})?KT\b/);
+            if (match) {
+                const dirStr = match[1];
+                const speedKt = parseInt(match[2], 10);
+                const dir = dirStr === 'VRB' ? null : parseInt(dirStr, 10);
+                const speedKmh = Math.round(speedKt * 1.852);
+                return { dir, speedKmh, speedKt };
+            }
+            return null;
+        };
+
+        const parseAtisRunways = (atisText) => {
+            if (!atisText) return null;
+            let landing = null, takeoff = null;
+
+            const arrMatch = atisText.match(/(?:ARR|ARRIVALS?|LANDING|EXPECT|ILS)\s+(?:RWY|RUNWAY|RUNWAYS)?\s*([0-3][0-9][LCR]?)/i);
+            if (arrMatch) landing = arrMatch[1];
+
+            const depMatch = atisText.match(/(?:DEP|DEPARTURES?|TAKEOFF)\s+(?:RWY|RUNWAY|RUNWAYS)?\s*([0-3][0-9][LCR]?)/i);
+            if (depMatch) takeoff = depMatch[1];
+
+            const inUseMatch = atisText.match(/(?:RUNWAY IN USE|RWY IN USE)\s*([0-3][0-9][LCR]?)/i);
+            if (inUseMatch) {
+                if (!landing) landing = inUseMatch[1];
+                if (!takeoff) takeoff = inUseMatch[1];
+            }
+
+            if (landing || takeoff) {
+                return { landing: landing || "Siehe ATIS", takeoff: takeoff || "Siehe ATIS" };
+            }
+            return null;
+        };
+
+        const getActiveRunwaysFallback = (airportCode, windDirection, windSpeedKt = 5) => {
+            if (windDirection === null || windDirection === undefined) {
+                return { landing: "Standard", takeoff: "Standard" };
+            }
+
+            const getDiff = (deg1, deg2) => {
+                let diff = Math.abs(deg1 - deg2) % 360;
+                return diff > 180 ? 360 - diff : diff;
+            };
+
+            switch (airportCode) {
+                case 'FMO':
+                    return getDiff(windDirection, 68) < getDiff(windDirection, 248)
+                        ? { landing: "07", takeoff: "07" }
+                        : { landing: "25", takeoff: "25" };
+                case 'AMS':
+                    return (windDirection >= 180 && windDirection <= 360)
+                        ? { landing: "18R", takeoff: "24" }
+                        : { landing: "06", takeoff: "36L" };
+                case 'FRA':
+                    return getDiff(windDirection, 69) < getDiff(windDirection, 249)
+                        ? { landing: "07L / 07R", takeoff: "07C / 18" }
+                        : { landing: "25L / 25R", takeoff: "25C / 18" };
+                case 'CGN':
+                    if (windDirection >= 190 && windDirection <= 290 && windSpeedKt >= 15) return { landing: "24", takeoff: "24" };
+                    if ((windDirection >= 295 || windDirection <= 20) && windSpeedKt >= 10) return { landing: "31R", takeoff: "31R" };
+                    return { landing: "13L", takeoff: "13L" };
+                case 'DUS':
+                    return getDiff(windDirection, 53) < getDiff(windDirection, 233)
+                        ? { landing: "05R", takeoff: "05R" }
+                        : { landing: "23L", takeoff: "23L" };
+                case 'BRU':
+                    if (windSpeedKt < 5) return { landing: "25L", takeoff: "25R" };
+                    if (windDirection >= 315 || windDirection < 45) return { landing: "01", takeoff: "01" };
+                    return getDiff(windDirection, 66) < getDiff(windDirection, 246)
+                        ? { landing: "07L", takeoff: "07R" }
+                        : { landing: "25L", takeoff: "25R" };
+                case 'LGG':
+                    return getDiff(windDirection, 44) < getDiff(windDirection, 224)
+                        ? { landing: "04R", takeoff: "04L" }
+                        : { landing: "22L", takeoff: "22R" };
+                default:
+                    return { landing: "n.a.", takeoff: "n.a." };
+            }
+        };
+
+        async function fetchMetar(icao) {
+            try {
+                const res = await fetch(`https://metar.vatsim.net/${icao}`);
+                if (res.ok) {
+                    const text = (await res.text()).trim();
+                    if (text && text.length > 5) return text;
+                }
+            } catch (e) {}
+
+            try {
+                const res = await fetch(`https://aviationweather.gov/api/data/metar?ids=${icao}`);
+                if (res.ok) {
+                    const text = (await res.text()).trim();
+                    if (text && text.length > 5) return text;
+                }
+            } catch (e) {}
+
+            return null;
+        }
+
+        async function fetchVatsimAtis() {
+            try {
+                const res = await fetch('https://data.vatsim.net/v3/vatsim-data.json');
+                if (res.ok) {
+                    const data = await res.json();
+                    return data.atis || [];
+                }
+            } catch (e) {
+                console.warn("Konnte VATSIM ATIS Feed nicht laden", e);
+            }
+            return [];
+        }
+
+        async function loadWeatherData() {
+            const grid = document.getElementById('dashboard-grid');
+
+            try {
+                const latitudes = AIRPORTS.map(ap => ap.lat).join(',');
+                const longitudes = AIRPORTS.map(ap => ap.lon).join(',');
+                const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitudes}&longitude=${longitudes}&current=temperature_2m,cloud_cover,wind_speed_10m,wind_direction_10m&daily=temperature_2m_max,sunshine_duration&hourly=cloud_cover,wind_speed_10m,wind_direction_10m,precipitation_probability&timezone=Europe%2FBerlin&forecast_days=5`;
+
+                const response = await fetch(url);
+                const data = await response.json();
+                const atisList = await fetchVatsimAtis();
+
+                grid.innerHTML = '';
+
+                for (let idx = 0; idx < AIRPORTS.length; idx++) {
+                    const ap = AIRPORTS[idx];
+                    const apDaily = Array.isArray(data) ? data[idx].daily : data.daily;
+                    const apHourly = Array.isArray(data) ? data[idx].hourly : data.hourly;
+                    const apCurrent = Array.isArray(data) ? data[idx].current : data.current;
+                    
+                    const liveTemp = Math.round(apCurrent.temperature_2m);
+                    const liveCloud = Math.round(apCurrent.cloud_cover);
+
+                    let currentWindDir = apCurrent.wind_direction_10m;
+                    let currentWindSpeedKmh = Math.round(apCurrent.wind_speed_10m);
+                    let currentWindSpeedKt = Math.round(currentWindSpeedKmh / 1.852);
+
+                    // Dynamischer Button-Link für JEDEN Flughafen
+                    const icaoBadge = `
+                        <a href="https://atis.guru/atis/${ap.icao}" target="_blank" title="ATIS für ${ap.icao} auf atis.guru öffnen" class="text-xs font-bold text-sky-400 hover:text-white bg-slate-900 hover:bg-sky-600 border border-sky-500/50 hover:border-sky-400 px-2 py-1 rounded-md transition-all duration-200 flex items-center gap-1 group shadow-lg shadow-sky-950/50">
+                            ${ap.icao}
+                            <span class="text-[10px] opacity-70 group-hover:translate-x-0.5 transition-transform">↗</span>
+                        </a>
+                    `;
+
+                    const card = document.createElement('div');
+                    card.className = "bg-slate-900/50 border-2 border-slate-800 rounded-2xl p-6 hover:border-indigo-500/50 transition-all duration-300 backdrop-blur-md flex flex-col justify-between shadow-2xl";
+
+                    let cardHtml = `
+                        <div>
+                            <div class="flex justify-between items-center mb-4 border-b-2 border-slate-800 pb-3">
+                                <h2 class="text-3xl font-black text-white flex items-center gap-2">
+                                    ${ap.code}
+                                    <span class="text-lg font-normal text-slate-400">/ ${ap.name}</span>
+                                </h2>
+                                ${icaoBadge}
+                            </div>
+
+                            <div class="bg-slate-950/70 p-3.5 rounded-xl border border-slate-800 text-sm mb-5 space-y-3">
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div class="flex items-center gap-2 text-sky-400 font-semibold">
+                                        <span class="text-lg">🛬</span>
+                                        <div>
+                                            <div class="flex items-center gap-1">
+                                                <span class="text-[10px] uppercase tracking-wider text-slate-500 block">Lande-Piste</span>
+                                                <span id="src-tag-${ap.icao}" class="text-[8px] bg-slate-800 text-slate-400 px-1 rounded">CALC</span>
+                                            </div>
+                                            <span id="runway-landing-${ap.icao}" class="text-base text-slate-200">...</span>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2 text-indigo-400 font-semibold">
+                                        <span class="text-lg">🛫</span>
+                                        <div>
+                                            <span class="text-[10px] uppercase tracking-wider text-slate-500 block">Start-Piste</span>
+                                            <span id="runway-takeoff-${ap.icao}" class="text-base text-slate-200">...</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="pt-2 border-t border-slate-800/80 grid grid-cols-3 gap-2 text-xs text-slate-300 font-medium">
+                                    <div class="flex items-center gap-1"><span>🌡️</span><span>${liveTemp}°C</span></div>
+                                    <div class="flex items-center gap-1"><span>☁️</span><span>${liveCloud}%</span></div>
+                                    <div id="live-wind-${ap.icao}" class="flex items-center gap-1 text-sky-300 justify-end">
+                                        <span class="inline-block" style="transform: rotate(${currentWindDir}deg);">↑</span>
+                                        <span>${getWindDirectionLabel(currentWindDir)} ${currentWindSpeedKmh} km/h</span>
+                                    </div>
+                                </div>
+
+                                <!-- METAR Anzeige -->
+                                <div class="pt-2 border-t border-slate-800/80 text-[10px]">
+                                    <span class="text-slate-500 font-bold uppercase tracking-wider text-[9px] block mb-0.5">METAR</span>
+                                    <div id="metar-${ap.icao}" class="font-mono bg-slate-900/90 p-2 rounded text-slate-300 leading-tight break-all border border-slate-800/80 animate-pulse whitespace-pre-wrap">
+                                        Lade METAR...
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="space-y-4">
+                    `;
+
+                    for (let dayIdx = 0; dayIdx < 5; dayIdx++) {
+                        const dateObj = new Date(apDaily.time[dayIdx]);
+                        const dayName = dayIdx === 0 ? "Heute" : WEEKDAYS[dateObj.getDay()];
+                        const sunHours = (apDaily.sunshine_duration[dayIdx] / 3600).toFixed(1);
+                        const tempMax = Math.round(apDaily.temperature_2m_max[dayIdx]);
+
+                        const dayHourlyStart = dayIdx * 24;
+                        const morningHours = [8, 9, 10, 11, 12];
+                        const afternoonHours = [13, 14, 15, 16, 17, 18];
+
+                        let vCloudSum = 0, vWindSum = 0, vWindDirSum = 0, vRainMax = 0;
+                        morningHours.forEach(h => {
+                            vCloudSum += apHourly.cloud_cover[dayHourlyStart + h] || 0;
+                            vWindSum += apHourly.wind_speed_10m[dayHourlyStart + h] || 0;
+                            vWindDirSum += apHourly.wind_direction_10m[dayHourlyStart + h] || 0;
+                            vRainMax = Math.max(vRainMax, apHourly.precipitation_probability[dayHourlyStart + h] || 0);
+                        });
+
+                        let nCloudSum = 0, nWindSum = 0, nWindDirSum = 0, nRainMax = 0;
+                        afternoonHours.forEach(h => {
+                            nCloudSum += apHourly.cloud_cover[dayHourlyStart + h] || 0;
+                            nWindSum += apHourly.wind_speed_10m[dayHourlyStart + h] || 0;
+                            nWindDirSum += apHourly.wind_direction_10m[dayHourlyStart + h] || 0;
+                            nRainMax = Math.max(nRainMax, apHourly.precipitation_probability[dayHourlyStart + h] || 0);
+                        });
+
+                        cardHtml += `
+                            <div class="border-b border-slate-800/40 pb-3 last:border-0 last:pb-0">
+                                <div class="flex justify-between items-center text-sm mb-1">
+                                    <span class="font-extrabold text-slate-200">${dayName}</span>
+                                    <div class="flex gap-4 text-xs text-slate-400">
+                                        <span>☀️ ${sunHours}h</span>
+                                        <span class="text-slate-300 font-semibold">${tempMax}°C</span>
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-1 gap-1 text-xs text-slate-400 font-medium pl-2">
+                                    <div class="flex justify-between items-center">
+                                        <span class="text-[10px] text-slate-500 font-black w-4 text-left">V</span>
+                                        <span class="w-16 text-left">☁️ ${Math.round(vCloudSum/5)}%</span>
+                                        <span class="w-16 text-left text-blue-400 font-semibold">💧 ${vRainMax}%</span>
+                                        <span class="w-28 text-right text-sky-400 flex items-center justify-end gap-1">
+                                            <span class="inline-block" style="transform: rotate(${Math.round(vWindDirSum/5)}deg);">↑</span>
+                                            <span>${getWindDirectionLabel(Math.round(vWindDirSum/5))} ${Math.round(vWindSum/5)} km/h</span>
+                                        </span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                        <span class="text-[10px] text-slate-500 font-black w-4 text-left">N</span>
+                                        <span class="w-16 text-left">☁️ ${Math.round(nCloudSum/6)}%</span>
+                                        <span class="w-16 text-left text-blue-400 font-semibold">💧 ${nRainMax}%</span>
+                                        <span class="w-28 text-right text-sky-300 flex items-center justify-end gap-1">
+                                            <span class="inline-block" style="transform: rotate(${Math.round(nWindDirSum/6)}deg);">↑</span>
+                                            <span>${getWindDirectionLabel(Math.round(nWindDirSum/6))} ${Math.round(nWindSum/6)} km/h</span>
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    cardHtml += `</div></div>`;
+                    card.innerHTML = cardHtml;
+                    grid.appendChild(card);
+
+                    // Standard-Fallback setzen
+                    const initRunways = getActiveRunwaysFallback(ap.code, currentWindDir, currentWindSpeedKt);
+                    document.getElementById(`runway-landing-${ap.icao}`).innerText = initRunways.landing;
+                    document.getElementById(`runway-takeoff-${ap.icao}`).innerText = initRunways.takeoff;
+
+                    // VATSIM ATIS Check
+                    const stationAtis = atisList.find(a => a.callsign && a.callsign.startsWith(ap.icao));
+                    if (stationAtis && stationAtis.text_atis) {
+                        const parsedAtisRunways = parseAtisRunways(stationAtis.text_atis.join(' '));
+                        if (parsedAtisRunways) {
+                            document.getElementById(`runway-landing-${ap.icao}`).innerText = parsedAtisRunways.landing;
+                            document.getElementById(`runway-takeoff-${ap.icao}`).innerText = parsedAtisRunways.takeoff;
+                            const tagEl = document.getElementById(`src-tag-${ap.icao}`);
+                            if (tagEl) {
+                                tagEl.innerText = "ATIS";
+                                tagEl.className = "text-[8px] bg-emerald-900/80 text-emerald-300 font-bold px-1 rounded border border-emerald-700";
+                            }
+                        }
+                    }
+
+                    // METAR Abruf
+                    fetchMetar(ap.icao).then((metar) => {
+                        const metarEl = document.getElementById(`metar-${ap.icao}`);
+                        const windEl = document.getElementById(`live-wind-${ap.icao}`);
+
+                        if (metarEl) {
+                            metarEl.classList.remove('animate-pulse');
+                            metarEl.innerText = metar || "Kein METAR verfügbar";
+                        }
+
+                        if (metar) {
+                            const parsedWind = parseMetarWind(metar);
+                            if (parsedWind && parsedWind.dir !== null) {
+                                const tagEl = document.getElementById(`src-tag-${ap.icao}`);
+                                if (tagEl && tagEl.innerText !== "ATIS") {
+                                    const realRunways = getActiveRunwaysFallback(ap.code, parsedWind.dir, parsedWind.speedKt);
+                                    document.getElementById(`runway-landing-${ap.icao}`).innerText = realRunways.landing;
+                                    document.getElementById(`runway-takeoff-${ap.icao}`).innerText = realRunways.takeoff;
+                                }
+
+                                windEl.innerHTML = `
+                                    <span class="inline-block" style="transform: rotate(${parsedWind.dir}deg);">↑</span>
+                                    <span>${getWindDirectionLabel(parsedWind.dir)} ${parsedWind.speedKmh} km/h (${parsedWind.speedKt}kt)</span>
+                                `;
+                            }
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error("Fehler beim Laden:", error);
+            }
+        }
+
+        loadWeatherData();
+    </script>
+</body>
+</html>
